@@ -1,0 +1,154 @@
+library(openxlsx)
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(ggrepel)
+library(Hmisc)
+library(dendextend)
+library(factoextra)
+```
+
+
+# Pobranie danych zawierających towar opisany przez rozważane cechy cechy (agregat z okresu jednego roku).
+
+produkty <- read.xlsx("Towar sprzedaż.xlsx", startRow = 8) %>%
+  rename(Zysk = `Sprzedaz.Zysk`)
+
+produkty %>% head()
+
+
+
+
+# Liczba produktów które przyniosły zysk, nie przyniosły zysku i przyniosły straty.y W dalszej części rozważane będą tylko modele które przyniosły zysk.
+
+produkty %>% mutate(Obrót = ifelse(Zysk > 0, "Zysk", ifelse(Zysk == 0, "0", "Straty"))) %>%
+  group_by(Obrót) %>% summarise(n = n()) %>%
+  ggplot(aes(x = Obrót, y = n))+
+  geom_col(aes(fill = Obrót), show.legend = F)+
+  geom_label_repel(aes(label = n))+
+  ylab("Liczebność")
+
+# Grupowanie analizowanych modeli w klastry
+
+
+zyskowne_produkty = produkty %>% filter(Zysk > 0)
+
+set.seed(42)
+
+cluster_data <- zyskowne_produkty[, map_lgl(zyskowne_produkty, is.numeric)] %>% scale(.) %>% as.data.frame(.)
+
+clusters = kmeans(cluster_data, round(sqrt(nrow(produkty))))
+
+zyskowne_produkty["Klaster"] = as.character(clusters$cluster)
+
+cluster_data["Klaster"] = as.character(clusters$cluster)
+
+rownames(cluster_data) = paste(as.character(clusters$cluster), zyskowne_produkty$Model)
+
+
+## Dendrogram
+
+
+
+cluster_data[,-5] %>% 
+  dist(.) %>% 
+  hclust(., method = "ward.D") %>% 
+  as.dendrogram(., leaflab = "textlike") -> dend
+
+dend %>%
+  set("labels_col", k = round(sqrt(nrow(cluster_data)), 0)) %>%
+  set("branches_k_color", k = round(sqrt(nrow(cluster_data)), 0)) %>%
+  set("labels_cex", 0.55) %>%
+  plot()
+
+
+## Podsumowanie klastrów
+
+zyskowne_produkty %>% group_by(Klaster) %>% summarise(n = n(),
+                                                      `Średni.Zysk` = mean(Zysk),
+                                                      `Średnia.Marza%` = mean(`Marza.%`),
+                                                      `Średnia.Rotacja.360.dni` = mean(`Rotacja.360.dni`),
+                                                      `Średnia_Ilosc_Rekl_Total/Sprz_total%` = mean(`Ilosc_Rekl_Total/Sprz_total%`),
+                                                      Średnia_Magazyn.ilosc.AVG = mean(Magazyn.ilosc.AVG)) %>%
+  arrange(desc(`Średni.Zysk`))
+
+
+
+## Charakterystyka klastrów
+
+cluster_data %>% group_by(Klaster) %>% summarise(`Średni.Zysk` = mean(Zysk),
+                                                      `Średnia.Marza%` = mean(`Marza.%`),
+                                                      `Średnia.Rotacja.360.dni` = mean(`Rotacja.360.dni`),
+                                                      `Średnia_Ilosc_Rekl_Total/Sprz_total%` = mean(`Ilosc_Rekl_Total/Sprz_total%`),
+                                                      Średnia_Magazyn.ilosc.AVG = mean(Magazyn.ilosc.AVG)) %>%
+  mutate(`Średni.Zysk` = rank(`Średni.Zysk`) / 10,
+            `Średnia.Marza%` = rank(`Średnia.Marza%`) / 10,
+            `Średnia.Rotacja.360.dni` = rank(`Średnia.Rotacja.360.dni`) / 10,
+            `Średnia_Ilosc_Rekl_Total/Sprz_total%` = rank(`Średnia_Ilosc_Rekl_Total/Sprz_total%`) / 10,
+            Średnia_Magazyn.ilosc.AVG = rank(Średnia_Magazyn.ilosc.AVG) / 10) %>%
+  gather(key = "Zmienna", value = "Natężenie", -Klaster) %>%
+  ggplot(aes(x = Klaster, y = Zmienna, fill = Natężenie))+
+  geom_tile()+
+  scale_fill_distiller(palette = 'RdBu')
+
+
+## Zysk osiągany z produktów należącycch do poszczególnych klastrów
+
+zyskowne_produkty %>%
+  ggplot(aes(x = fct_reorder(Klaster, Zysk), y = Zysk / 1000, color = Klaster))+
+  geom_jitter()+
+  ylab("Zysk (tys.)")+
+  xlab("Klaster")
+
+
+## Marża osiągana z produktów należącycch do poszczególnych klastrów
+
+zyskowne_produkty %>%
+  ggplot(aes(x = fct_reorder(Klaster, `Marza.%`), y = `Marza.%`, color = Klaster))+
+  geom_jitter()+
+  ylab("Marża %")+
+  xlab("Klaster")
+
+
+## Rotacja 360 dni z produktów należącycch do poszczególnych klastrów
+
+zyskowne_produkty %>%
+  ggplot(aes(x = fct_reorder(Klaster, `Rotacja.360.dni`), y = `Rotacja.360.dni`, color = Klaster))+
+  geom_jitter()+
+  ylab("Rotacja 360 dni")+
+  xlab("Klaster")
+
+
+## Wskaźnik reklamacji na produktach należącycch do poszczególnych klastrów
+
+zyskowne_produkty %>%
+  ggplot(aes(x = fct_reorder(Klaster, `Ilosc_Rekl_Total/Sprz_total%`), y = `Ilosc_Rekl_Total/Sprz_total%`, color = Klaster))+
+  geom_jitter()+
+  ylab("Ilosc_Rekl_Total/Sprz_total%")+
+  xlab("Klaster")
+
+## Średnie ilości magazynowe dla produktów należącycch do poszczególnych klastrów
+
+zyskowne_produkty %>%
+  ggplot(aes(x = fct_reorder(Klaster, Magazyn.ilosc.AVG), y = Magazyn.ilosc.AVG, color = Klaster))+
+  geom_jitter()+
+  ylab("Magazyn.ilosc.AVG")+
+  xlab("Klaster")
+
+## Średnia zyskowność klastrów
+
+zyskowne_produkty %>%
+  group_by(Klaster) %>% summarise(Zysk = mean(Zysk) / 1000) %>%
+  ggplot(aes(x = reorder(Klaster, Zysk), y = Zysk, fill = Klaster))+
+  geom_col()+
+  ylab("Średni zysk (tys.)")+
+  xlab("Klaster")
+
+## Suma zysku z produktów należących do poszczególnych klastrów
+
+zyskowne_produkty %>%
+  group_by(Klaster) %>% summarise(Zysk = sum(Zysk) / 1000) %>%
+  ggplot(aes(x = reorder(Klaster, Zysk), y = Zysk, fill = Klaster))+
+  geom_col()+
+  ylab("Zysk z klastra (tys.)")+
+  xlab("Klaster")
