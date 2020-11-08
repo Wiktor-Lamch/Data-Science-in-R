@@ -1,0 +1,546 @@
+---
+title: "Analiza klientów firmy doradczej"
+author: "Wiktor Lamch"
+date: "01 11 2020"
+output: html_document
+---
+
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+#Ładowanie niezbędnych pakietów i ustawianie stylu wykresów
+library(tidyverse)
+library(lubridate)
+library(GGally)
+library(randomForest)
+library(psych)
+library(Hmisc)
+library(broom)
+library(cowplot)
+theme_set(theme_light())
+```
+
+
+# W analizie zostanie zbadany wpływ zmiennych na zyski osiągane przez firmę doradczą z firm będących jej klientami.
+
+
+## Hipoteza badawcza brzmi: Czym charakteryzują się firmy, które przynoszą firmie doradczej duże zyski a czym te, które przynoszą niewielkie?
+
+### Wczytywanie i przygotowanie danych. 
+#### Zmienna id nie niesie za sobą żadnych informacji. Jej wartości jednoznacznie identyfikują obserwacje. W związku z tym zostanie ona usunięta ze zbioru. Dodatkowo do zbioru danych zostanie dodana zmienna rok_rejestracji oraz rok_ostatniego_zamowienia. Zmienne zawierające miesiące nie są informatywne więc nie zostaną dodane do zbioru.
+
+
+```{r}
+firmy <- read.csv2("klienci_firmy_doradczej.csv", na.strings = "") %>%
+  mutate(data_rejestracji = dmy(data_rejestracji),
+         data_ostatnie_zamowienie = dmy(data_ostatnie_zamowienie),
+         kod_branzy = as.character(kod_branzy),
+         rok_rejestracji = year(data_rejestracji),
+         rok_ostatniego_zamowienia = year(data_ostatnie_zamowienie)) %>%
+  select(-c("id", "data_rejestracji", "data_ostatnie_zamowienie"))
+
+firmy %>% head()
+```
+
+
+
+```{r}
+firmy %>% Hmisc::describe()
+```
+
+
+#### Zmienna liczba_pracownikow posiada 9325 wartości brakujących. Stanowią one 64,26% wszystkich obserwacji.
+
+
+```{r}
+sumna <- function(x) sum(is.na(x))
+
+firmy %>% summarise_all(sumna)
+```
+
+```{r}
+paste0("Procent brakujących obserwacji dla zmiennej liczba_pracownikow: ",
+       mean(is.na(firmy$liczba_pracownikow)) %>% round(., 4) * 100, "%")
+```
+
+
+#### Rozkład zmiennej docelowej jest skrajnie asymetryczny. Charakretyzuje się bardzo silną prawostronną asymetrią.
+
+
+```{r}
+firmy %>% ggplot(aes(target_wartosc_sprzedazy))+
+  geom_histogram(bins = 100)+
+  ylab("Liczba firm")
+```
+
+
+#### Obserwacje odstające zostaną wyeliminowane z dalszej analizy. Zostanie do tego użyta reguła 1.5 wartości rozstępu międzykwartylowego.
+
+
+```{r}
+IQR <- quantile(firmy$target_wartosc_sprzedazy, 0.75) - quantile(firmy$target_wartosc_sprzedazy, 0.25)
+upper_boundary <- quantile(firmy$target_wartosc_sprzedazy, 0.75) + 1.5 * IQR
+```
+
+
+#### Granica wyznaczająca obserwacje odstające
+
+
+```{r}
+firmy %>% ggplot(aes(target_wartosc_sprzedazy))+
+  geom_histogram(bins = 100)+
+  ylab("Liczba firm")+
+  geom_vline(aes(xintercept = upper_boundary), show.legend = T, col = "red")
+```
+
+
+#### Zostało odrzuconych 1797 obserwacji, co stanowi 12% całego zbioru. W porównaniu do liczby obserwacji w analizowanym zbiorze, ubytek ten nie spowoduje utraty informacji.
+
+
+```{r}
+firmy_duza_sprzedaz <- firmy %>% filter(target_wartosc_sprzedazy > upper_boundary)
+```
+
+
+```{r}
+paste("Liczba obserwacji odstajcych:", sum(firmy$target_wartosc_sprzedazy > upper_boundary))
+
+paste0("Procent obserwacji odstajcych: ", round(mean(firmy$target_wartosc_sprzedazy > upper_boundary) * 100, 2), "%")
+
+
+firmy <- firmy %>% filter(target_wartosc_sprzedazy <= upper_boundary)
+```
+
+
+#### Rozkład zmiennej target_wartosc_sprzedazy po usunięciu obserwacji odstających ze zbioru.
+
+
+```{r}
+firmy %>%
+  ggplot(aes(target_wartosc_sprzedazy))+
+  geom_histogram(bins = 100)+
+  ylab("Liczba firm")
+```
+
+# Zmienne numeryczne
+
+#### Poniższy wykres liniowy przedstawia medianę wartości osiąganych przez firmy w zależności od roku rejestracji. Do roku 1980 mediana wartości sprzedaży charakteryzuje się bardzo dużym zróżnicowaniem. Tak duża zmienność może utrudniać wyciąganie wniosków w dalszej analizie, więc gdy firm zarejestrowanych do 1990 roku będzie niewiele, zostaną one usunięte ze zbioru danych. Dodatkowo gdy firm zarejestrowanych przed 1990 rokiem jest niewiele to wyliczone dla tych lat mediany mogą być obarczone zbyt dużym błędem statystycznym.
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+firmy %>%
+  group_by(rok_rejestracji) %>%
+  summarise(target_wartosc_sprzedazy = median(target_wartosc_sprzedazy)) %>%
+  ggplot(aes(rok_rejestracji, target_wartosc_sprzedazy))+
+  geom_point()+
+  geom_line()+
+  xlab("Rok rejestracji")+
+  ylab("target_wartosc_sprzedazy - mediana")
+```
+
+
+#### Poniżej widać, że firm zarejestrowanych przed 1990 rokiem jest niewiele. Jest ich 284 co stanowi 2,23% firm znajdujących się w zbiorze danych. W związku z tym zostana one usunięte ze zbioru.
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+firmy %>%
+  count(rok_rejestracji) %>%
+  ggplot(aes(rok_rejestracji, n))+
+  geom_point()+
+  geom_line()+
+  ylab("Liczba zarejestrowanych firm")
+```
+```{r}
+paste("Liczba firm zarejestrowanych przed 1990 rokiem:", sum(firmy$rok_rejestracji < 1990))
+paste0("Procent firm zarejestrowanych przed 1990 rokiem: ", round(mean(firmy$rok_rejestracji < 1990) * 100, 2),"%")
+
+firmy <- firmy %>% filter(rok_rejestracji >= 1990)
+```
+
+
+#### Na podstawie oczyszczonych danych można łatwo zauważyć, że firmy później zarejestrowane pozwalają na osiągnięcie wyższych zysków. Można wywnioskować, że rok rejestracji jest dodatnio skorelowany z wartością sprzedaży. Zależność ta jednak nie ma liniowego charakteru.
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+firmy %>%
+  group_by(rok_rejestracji) %>%
+  summarise(target_wartosc_sprzedazy = median(target_wartosc_sprzedazy)) %>%
+  ggplot(aes(rok_rejestracji, target_wartosc_sprzedazy))+
+  geom_point()+
+  geom_line()+
+  geom_smooth(se = F)+
+  xlab("Rok rejestracji")+
+  ylab("target_wartosc_sprzedazy - mediana")
+```
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+firmy %>%
+  group_by(rok_rejestracji) %>%
+  summarise(target_wartosc_sprzedazy = mean(target_wartosc_sprzedazy)) %>%
+  ggplot(aes(rok_rejestracji, target_wartosc_sprzedazy))+
+  geom_point()+
+  geom_line()+
+  geom_smooth(se = F)+
+  xlab("Rok rejestracji")+
+  ylab("target_wartosc_sprzedazy - średnia")
+```
+
+
+#### Rok ostatniego zamówienia dość dobrze różnicuje wartość sprzedaży. Firmy które ostatni raz złożyły zamówienie w 2018 roku cechują się niższą wartością zmiennej docelowej. Czyżby to klienci niezbyt chętnie korzystający z usług, którzy już zrezygnowali ?
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+firmy %>% 
+  ggplot(aes(as.factor(rok_ostatniego_zamowienia), target_wartosc_sprzedazy))+
+  geom_boxplot()+
+  coord_flip()+
+  stat_summary(fun.y="mean", col = "red")+
+  xlab("Rok ostatniego zamówienia")
+```
+
+
+# Zmienne nienumeryczne
+
+### Aby nie duplikować kodu zostaną stworzone funkcje do wyświetlania wykresów
+
+
+```{r}
+make_barplot <- function(data = firmy, zmienna = "kod_rynku", xlab = "Kod rynku", 
+                         ylab = "Liczba firm", lab_size = 9){
+  data %>%
+  count(data[[zmienna]]) %>%
+  rename(zmienna = 1) %>%
+  ggplot(aes(x = fct_reorder(zmienna, n, sum), y = n))+
+  geom_col()+
+  coord_flip()+
+  xlab(xlab)+
+  ylab(ylab)+
+  theme(axis.text = element_text(size = lab_size))
+}
+
+
+make_boxplots <- function(data = firmy, zmienna = "kod_rynku", xlab = "Kod rynku", lab_size = 9){
+  data[,c(zmienna, "target_wartosc_sprzedazy")] %>%
+  rename(zmienna = 1) %>%
+  ggplot(aes(fct_reorder(zmienna, target_wartosc_sprzedazy), target_wartosc_sprzedazy))+
+  geom_boxplot()+
+  coord_flip()+
+  stat_summary(fun="mean", col = "red")+
+  xlab(xlab)+
+  theme(axis.text = element_text(size = lab_size))
+}
+```
+
+
+```{r}
+make_barplot(zmienna = "nazwa_wojewodztwa", , xlab = "")
+```
+
+
+#### Na poniższych wykresach widać, że województwo nie ma istotnego wpływu na wartość sprzedaży. Zarówno wartości mediany jak i średnie arytmetyczne (oznaczone czerwonymi kropkami) nie różnią się od siebie istotnie. Widać również, że zakresy międzykwartylowe na poniższych wykresach są podobne. Jedynie województwo lubuskie i podlaskie nieco odbiegają od reszty.
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+make_boxplots(zmienna = "nazwa_wojewodztwa", xlab = "")
+```
+
+```{r}
+make_barplot(zmienna = "kod_rynku", xlab = "Kod rynku", lab_size = 6)
+``` 
+
+
+#### Kod rynku bardziej różnicuje wartość sprzedaży. Firmy o kodach "LSW" i "TYW" cechują się nieco większą wartością mediany. Pomimo tego ciężko jest zaobserwować istotny wzorzec, który pozwoliłby na stwierdzenie, że ta zmienna istotnie wpływa na poziom wartości sprzedaży.
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+make_boxplots(zmienna = "kod_rynku", xlab = "Kod rynku", lab_size = 6)
+```
+
+
+```{r}
+make_barplot(zmienna = "kod_branzy", xlab = "Kod branży")
+```
+
+
+#### Kod 1387 i 652 cechują się największymi wartościami średniej i mediany. Branża o kodzie 755 z kolei najniższymi. Dosyć wyraźne różnice w rozkładach wartości sprzedaży dla firm działających w branżach o wymienionych kodach mogą przyczynić się do istotnego wpływu tej zmiennej na zmienną docelową.
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+make_boxplots(zmienna = "kod_branzy", xlab = "Kod branży")
+```
+
+
+#### Firm zartudniających powyżej 10 osób jest w analizowanym zbiorze bardzo niewiele. Pomimo tego widać, że większe firmy zatrudniające powyżej 10 osób mają przeciętnie wyższą wartość sprzedaży od pozostałych. Jak wspomniano powyżej, ponad 60% obserwacji tej zmiennej nie ma przypisanej żadnej kategorii.
+
+
+```{r}
+make_barplot(data = firmy %>% na.omit(), zmienna = "liczba_pracownikow", xlab = "Liczba pracowników")
+```
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+make_boxplots(zmienna = "liczba_pracownikow", xlab = "Liczba pracowników")
+```
+
+
+#### W KRS w rejestrze przedsiębiorców są przede wszystkim zarejestrowane spółki osobowe oraz kapitałowe. W CEIDG natomiast osoby fizyczne prowadzące działalność gospodarczą. Spółki osobowe i kapitałowe mają przeważnie większy kapitał, a co za tym idzie większe obroty (można to zauważyć na wykresach pudełkowych). Zmienna ta charakteryzuje się dużą dysproporcją. Może to spowodować niewielką informatywność tej zmiennej. Niemniej jednak, korzystając z wiedzy ogólnej, zostanie ona poddana dalszej analizie.
+
+
+```{r}
+make_barplot(zmienna = "zrodlo_rejestr", xlab = "Źródło rejestracji")
+```
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+make_boxplots(zmienna = "zrodlo_rejestr", xlab = "Źródło rejestracji")
+```
+
+
+#### W tym przypadku można wyraźnie zauważyć, że firmy obecne w sieci cechują się większą wartościa sprzedaży. Wyraźnie widać, że poziom "e-commerce" oraz "mają stronę www" posiadają niemalże identyczne rozkłady. W związku z tym zostaną one połączone w jeden poziom.
+
+
+```{r}
+make_barplot(zmienna = "obecnosc_w_internecie", xlab = "Obecność w internecie")
+```
+
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+make_boxplots(zmienna = "obecnosc_w_internecie", xlab = "Obecność w internecie")
+```
+
+```{r}
+firmy <- firmy %>% mutate(obecnosc_w_internecie = 
+                            ifelse(obecnosc_w_internecie == "ma stronę www" |
+                                     obecnosc_w_internecie == "e-commerce", "tak", "nie"))
+
+firmy_duza_sprzedaz <- firmy_duza_sprzedaz %>% mutate(obecnosc_w_internecie = 
+                            ifelse(obecnosc_w_internecie == "ma stronę www" |
+                                     obecnosc_w_internecie == "e-commerce", "tak", "nie"))
+```
+
+
+#### Po połączeniu poziomów dysproporcja nie jest znacząca, więc zmienna ta powinna dobrze różnicować firmy ze względu na wartość sprzedaży.
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+make_boxplots(zmienna = "obecnosc_w_internecie", xlab = "Obecność w internecie")
+```
+
+
+# Analiza zależności
+
+## Do zbadania zależności pomiędzy zmienną objaśnianą a zmiennymi objaśniającymi posłużę się współczynnikiem korelacji wielorakiej szacowanym przy pomocy modelu regresji.
+
+#### Jak można zauważyć w poniższej tabeli, żadna zmienna nie ma silnego wpływu na zmienną wartość sprzedaży. Wpływ zmiennej obecnosc_w_internecie, rok_ostatniego_zamowienia, rok_rejestracji oraz kod_branzy (jak można było przypuszczać analizując wykresy) jest statystycznie istotny. Najsilniejszy wpływ na zmienną objaśnianą ma zmienna obecnosc_w_internecie oraz rok_ostatniego_zamowienia.
+
+
+```{r}
+zmienne_objasniajace = firmy %>% select(-target_wartosc_sprzedazy) %>% colnames(.)
+
+R <- vector(length = length(zmienne_objasniajace))
+R_kwadrat <- vector(length = length(zmienne_objasniajace))
+
+for (i in 1:length(zmienne_objasniajace)){
+  reg <- lm(firmy$target_wartosc_sprzedazy ~ factor(firmy[,zmienne_objasniajace[i]]))
+  smr <- summary(reg)
+  R[i] <- sqrt(smr$adj.r.squared)
+  R_kwadrat[i] <- smr$adj.r.squared
+}
+
+
+tibble(zmienne_objasniajace, R, R_kwadrat) %>% arrange(desc(R))
+```
+
+
+#### Do oceny siły wpływu zmiennych objaśniających na zmienną objaśnianą zostaną włączone tylko te zmienne, których wpływ jest istotny statystycznie (jak wspomniano wcześniej, zostanie dodana zmienna zrodlo_rejestr).
+
+
+```{r}
+summary(lm(data = firmy, target_wartosc_sprzedazy ~ obecnosc_w_internecie + rok_ostatniego_zamowienia + rok_rejestracji + kod_branzy + zrodlo_rejestr))
+```
+
+
+#### Poniżej przedstawiono jedynie istotne statystycznie parametry zmiennych mających istotny wpływ na zmienną objaśnianą. Dla zmiennych nienumerycznych informują one o ile przeciętnie zmieni się wartość zmiennej docelowej gdy wystąpi określony poziom danej zmiennej. Dla zmiennych numerycznych (które w analizowanym zbiorze przedstawiają lata) informują o ile przeciętnie zmieni się (wzrośnie gdy parametr jest dodatni lub zmaleje gdy jest ujemny) wartość sprzedaży gdy wartość zmiennej wzrośnie o rok.
+
+
+```{r}
+summary(lm(data = firmy, target_wartosc_sprzedazy ~ obecnosc_w_internecie + rok_ostatniego_zamowienia + rok_rejestracji + kod_branzy + zrodlo_rejestr)) %>% tidy() %>% 
+  filter(p.value <= 0.05) %>%
+  select(term, estimate) %>% filter(term != "(Intercept)") %>%
+  arrange(desc(estimate))
+```
+
+
+### Odpowiadając na hipotezę badawczą, firmy kupujące drogie produkty to przede wszystkim firmy, które ogólnie rzecz biorąc są obecne w internecie, zarejestrowane w KRS po 2011 roku, złożyły w ostatnim czasie zamówienie oraz działające w branży o kodzie 1387 lub 652. Firmy kupujące tanie produkty przeważnie nie są obecne w internecie, są zarejestrowane przed 2011 rokiem w CEIDG, nie złożyły w ostatnich dwóch latach zamówienia i działają w branżach o kodach 98, 1171, 755, 185, 411 czy 1574. Analiza jednak wykazała, że nie jest to silna zależność. Wymienione powyżej czynniki w tym przypadku jedynie w pewnym stopniu sprzyjają zdarzeniu, że firma będzie miała dużą bądź niską wartość sprzedaży.
+
+
+## Na sam koniec zobaczymy czym charakteryzują się firmy które przyniosły firmie doradczej bardzo duże zyski. Może uda się zaobserwować coś ciekawego.
+
+```{r}
+firmy_comp <- firmy %>% mutate(typ = "pozostałe") %>%
+  bind_rows(firmy_duza_sprzedaz %>% mutate(typ = "bardzo zyskowne"))
+```
+
+
+#### Do porównań firm które są zyskowne oraz bardzo zyskowne zostanie wykorzystany estymator frakcji poszczególnych poziomów cech. Przez odsetek/frakcję możemy rozumieć prawdopodobieństwo wystąpienia firmy o danej cesze która należy do danej grupy zyskowności. Jak widać poniżej, kategorie cechują się dużą liczebnością więc wnioskowanie powinno się charakteryzować dużą „mocą”.
+
+```{r}
+lista <- list("pozostałe" = firmy, "bardzo zyskowne" = firmy_duza_sprzedaz)
+
+for (i in 1:2){
+  print(paste0("Liczba firm z kategorii ", names(lista)[i], ": ", nrow(lista[[i]])))
+}
+```
+
+
+
+#### W tym przypadku również stworzymy funkcje wyświetlające wykresy.
+
+
+```{r}
+make_barplots <- function(data = firmy_comp, zmienna = "kod_rynku", xlab = "Kod rynku", 
+                         ylab1 = "Liczba bardzo zyskownych firm", ylab2 = "Liczba pozostałych firm",
+                         lab_size = 9){
+  
+  df1 <- data %>% filter(typ == "bardzo zyskowne")
+  df2 <- data %>% filter(typ == "pozostałe")
+  
+  plt1 <- df1 %>%
+  count(df1[[zmienna]]) %>%
+  rename(zmienna = 1) %>%
+  ggplot(aes(x = fct_reorder(zmienna, n, sum), y = n))+
+  geom_col()+
+  coord_flip()+
+  xlab(xlab)+
+  ylab(ylab1)+
+  theme(axis.text = element_text(size = lab_size))
+  
+  plt2 <- df2 %>%
+  count(df2[[zmienna]]) %>%
+  rename(zmienna = 1) %>%
+  ggplot(aes(x = fct_reorder(zmienna, n, sum), y = n))+
+  geom_col()+
+  coord_flip()+
+  xlab("")+
+  ylab(ylab2)+
+  theme(axis.text = element_text(size = lab_size))
+  
+  plot_grid(plt1, plt2)
+}
+
+
+make_perc_barplots <- function(data = firmy_comp, zmienna = "kod_rynku", xlab = "Kod rynku", 
+                         ylab = "Procent firm", lab_size = 9){
+  
+  data %>%
+  count(data[,c("typ", zmienna)]) %>%
+  rename(typ = 1, zmienna = 2) %>%
+  group_by(typ) %>%
+  mutate(perc = n / sum(n)) %>%
+  ggplot(aes(fct_reorder(zmienna, perc), perc))+
+  geom_col(aes(fill = typ), position = "dodge")+
+  coord_flip()+
+  scale_y_continuous(labels = scales::percent_format())+
+  xlab(xlab)+
+  ylab(ylab)+
+  theme(axis.text = element_text(size = lab_size))
+  
+}
+```
+
+
+#### Wśród bardzo zyskownych firm największym odsetkiem charakteryzują się firmy z województwa śląskiego. Może być to spowodowane tym, że na śląsku jest zlokalizowanych najwięcej firm z sektora przemysłowego, który cechuje się w porównaniu do innych sektorów największymi dochodami. Na poniższym wykresie widać, że dla województwa śląskiego odsetek bardzo zyskownych firm jest dużo większy od pozostałych. Dla innych województw różnice nie są aż tak widoczne. Można również zauważyć że w województwach najsłabiej rozwiniętych odsetek bardzo zyskownych firm jest niższy od pozostałych.
+
+
+```{r}
+make_barplots(zmienna = "nazwa_wojewodztwa", xlab = "")
+```
+
+```{r}
+make_perc_barplots(zmienna = "nazwa_wojewodztwa", xlab = "")
+```
+
+
+#### W przypadku kodu rynku widać znaczny wzrost odsetka bardzo zyskownych firm w porównaniu do odsetka wśród pozostałych na rynkach o kodach GDW, WAW, POW, WRW, KTW, KRW, SZW, GLW, GDW, TYW. Widać również rynki w których odsetek bardzo zyskownych firm jest dużo mniejszy od odsetka wśród pozostałych.
+
+
+```{r}
+make_barplots(zmienna = "kod_rynku", xlab = "Kod rynku", lab_size = 6)
+```
+
+```{r}
+make_perc_barplots(zmienna = "kod_rynku", xlab = "Kod rynku", lab_size = 6)
+```
+
+
+#### Odsetek firm ze względu na kod branży wśród bardzo zyskownych i pozostałych firm jest zróżnicowany. Pokrywa się to z wcześniejsza analizą. Widać, że dla branży 1574, 411, 1171 czy 98 odsetek firm bardzo zyskownych jest mniejszy od odsetka tych branż w grupie mniej zyskownych firm.
+
+
+```{r}
+make_barplots(zmienna = "kod_branzy", xlab = "Kod branży")
+```
+
+
+
+```{r}
+make_perc_barplots(zmienna = "kod_branzy", xlab = "Kod branży")
+```
+
+
+#### Poniższy wykres bardzo dobrze oddaje rzeczywistą sytuację. Doskonale widać, że odsetek firm zatrudniających powyżej 10 osób wśród bardzo zyskownych firm jest większy od odsetka tego rodzaju firm dla pozostałych. Dla firm zatrudniających mniej jak 10 osób sytuacja ta jest odmienna. Należy jednak zaznaczyć, że odsetek mniejszych firm w grupie bardzo zyskownych i pozostałych firm jest bardzo duży, znacznie większy od firm zatrudniających powyżej 10 osób.
+
+
+```{r}
+make_barplots(data = firmy_comp %>% na.omit(), zmienna = "liczba_pracownikow", xlab = "Liczba pracowników")
+```
+
+```{r}
+make_perc_barplots(data = firmy_comp %>% na.omit(), zmienna = "liczba_pracownikow", xlab = "Liczba pracowników")
+```
+
+
+#### Większy jest odsetek bardzo zyskownych firm zarejestrowanych w KRS aniżeli tych które generują mniejsze zyski. Pomino tego liczba firm zarejestrowanych w CEIDG jest znacznie większa od tych które są zarejestrowane w KRS. Poniższy wykres jest dodatkowym potwierdzeniem poprzedniego wniosku.
+
+
+```{r}
+make_barplots(zmienna = "zrodlo_rejestr", xlab = "Źródło rejestracji")
+```
+
+
+```{r}
+make_perc_barplots(zmienna = "zrodlo_rejestr", xlab = "Źródło rejestracji")
+```
+
+
+#### Wśród bardzo zyskownych firm, odsetek firm nieobecnych w internecie wynosi zaledwie około 10%. Z kolei wśród firm które nie przynoszą bardzo dużych przychodów odsetek ten wynosi około 37%. Jest to bardzo istotna różnica, która potwierdza poprzednie wnioski mówiące że firmy obecne w sieci pozwalają przeciętnie generować większe zyski.
+
+
+```{r}
+make_barplots(zmienna = "obecnosc_w_internecie", xlab = "Obecność w internecie")
+```
+
+
+```{r}
+make_perc_barplots(zmienna = "obecnosc_w_internecie", xlab = "Obecność w internecie")
+```
+
+
+#### Bardzo zyskowne firmy charakteryzują się również tym, że są aktywnymi klientami. Znaczna ich większość dokonała ostatniego zamówienia w 2020 roku (w tym roku została przeprowadzona niniejsza analiza). Niewielki odsetek stanowią firmy które dokonały ostatniego zamówienia w 2018 roku.
+
+
+```{r}
+firmy_comp %>% group_by(typ) %>% count(rok_ostatniego_zamowienia) %>%
+  mutate(perc = n / sum(n)) %>%
+  ggplot(aes(typ, perc, fill = factor(rok_ostatniego_zamowienia)))+
+  geom_col(position = "dodge")+
+  labs(fill = "Rok ostatniego zamówienia")+
+  scale_y_continuous(labels = scales::percent_format())+
+  ylab("Procent firm")
+```
+
+
+
+
+
+
+
